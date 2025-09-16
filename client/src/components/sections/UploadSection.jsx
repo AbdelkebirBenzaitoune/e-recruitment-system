@@ -310,12 +310,7 @@ export default function UploadSection({
         data.messages.forEach((m) => window.__chatAppend(m));
       }
 
-      if (window.__chatAppend) {
-        window.__chatAppend({
-          type: "system",
-          text: `✅ Analyse terminée — Score: ${Math.round((data.score || 0) * 100) / 100} / 100.`,
-        });
-      }
+      
     } catch (err) {
       const msg = err?.message?.includes("Failed to fetch")
         ? "Impossible de se connecter au serveur. Vérifiez qu'il est démarré sur le port 3001."

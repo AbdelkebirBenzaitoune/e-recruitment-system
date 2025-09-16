@@ -80,46 +80,50 @@ export default function QuizSection() {
     if (!questions.length) return;
 
     setLoading(true);
+    setError("");
+
     try {
-      // Correction locale
-      let score = 0;
-      const details = questions.map(q => {
-        const ok = q.answerIndex === answers[q.id];
-        if (ok) score += 1;
-        return {
-          id: q.id,
-          ok,
-          expected: q.answerIndex,
-          got: answers[q.id],
-          question: q.question,
-          explanation: q.explanation,
-          skillArea: q.skillArea
-        };
+      const headers = getAuthHeaders();
+      
+      // APPEL À L'API BACKEND pour évaluation ET sauvegarde
+      const res = await fetch("/api/quiz/evaluate", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          answers: answers,
+          questions: questions
+        }),
       });
 
-      const percentage = Math.round((score / questions.length) * 1000) / 10;
+      const ct = res.headers.get("content-type") || "";
+      const data = ct.includes("application/json") ? await res.json() : {};
 
+      if (!res.ok) {
+        if (res.status === 401) {
+          throw new Error("Session expirée. Veuillez vous reconnecter.");
+        }
+        throw new Error(data?.error || "Erreur lors de l'évaluation du quiz");
+      }
+
+      // Les données viennent maintenant du backend (avec sauvegarde automatique)
       setResult({
-        score,
-        total: questions.length,
-        details,
-        percentage,
-        feedback: generateLocalFeedback(percentage, details)
+        score: data.score,
+        total: data.total,
+        percentage: data.percentage,
+        feedback: data.feedback,
+        details: data.detailed_results // Utiliser les résultats détaillés du backend
       });
+      
       setShowResults(true);
+      
+      console.log(`✅ Quiz évalué et sauvegardé: ${data.percentage}% (${data.score}/${data.total})`);
 
     } catch (e) {
-      setError("Erreur lors de la correction: " + e.message);
+      setError("Erreur lors de l'évaluation: " + e.message);
+      console.error("Erreur évaluation:", e);
     } finally {
       setLoading(false);
     }
-  }
-
-  function generateLocalFeedback(percentage) {
-    if (percentage >= 80) return { level: "Excellent", message: "Félicitations ! Vous maîtrisez très bien le sujet.", color: "green", percentage };
-    if (percentage >= 60) return { level: "Bien", message: "Bon travail ! Quelques points à revoir mais vous êtes sur la bonne voie.", color: "blue", percentage };
-    if (percentage >= 40) return { level: "Moyen", message: "Il y a des lacunes à combler. Continuez à étudier !", color: "orange", percentage };
-    return { level: "À améliorer", message: "Il faut revoir les bases. Ne vous découragez pas !", color: "red", percentage };
   }
 
   function resetQuiz() {
@@ -237,7 +241,7 @@ export default function QuizSection() {
             <div className="text-sm text-slate-600">{allAnswered ? <span className="text-green-600 font-medium">✓ Toutes les questions ont été répondues</span> : "Répondez à toutes les questions avant de corriger"}</div>
             <button onClick={correct} disabled={!allAnswered || loading} className="btn btn-primary disabled:opacity-50 flex items-center gap-2">
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-              Corriger le quiz
+              {loading ? "Correction en cours..." : "Corriger le quiz"}
             </button>
           </div>
         </div>
@@ -258,25 +262,24 @@ export default function QuizSection() {
               <div className="text-2xl font-bold text-slate-900">{result.score}/{result.total}</div>
               <div className="text-right">
                 <div className="text-2xl font-bold text-indigo-600">{result.percentage}%</div>
-                <div className="text-xs text-slate-500">Score final</div>
+                <div className="text-xs text-slate-500">Score final - Sauvegardé ✓</div>
               </div>
             </div>
           </div>
-
 
           {/* Détail des Questions */}
           <div className="space-y-3">
             <h4 className="font-semibold text-slate-800">Détail des réponses</h4>
             
-            {questions.map((q, i) => {
-              const detail = result.details.find(d => d.id === q.id);
-              const isCorrect = detail?.ok;
+            {result.details && result.details.map((detail, i) => {
+              const question = questions.find(q => q.id === detail.question_id) || questions[i];
+              const isCorrect = detail.is_correct;
               
               return (
-                <div key={q.id} className="card p-4">
+                <div key={detail.question_id || i} className="card p-4">
                   <div className="flex items-start justify-between mb-3">
                     <div className="text-sm font-medium text-slate-800">
-                      Q{i + 1}. {q.question}
+                      Q{i + 1}. {detail.question || question?.question}
                     </div>
                     {isCorrect ? (
                       <CheckCircle2 className="h-5 w-5 text-green-600" />
@@ -285,41 +288,27 @@ export default function QuizSection() {
                     )}
                   </div>
 
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 mb-3">
-                    {q.choices.map((c, idx) => {
-                      const isUserAnswer = answers[q.id] === idx;
-                      const isCorrectAnswer = q.answerIndex === idx;
-                      
-                      let bgColor = 'bg-slate-50';
-                      let textColor = 'text-slate-700';
-                      let borderColor = 'border-slate-200';
-                      
-                      if (isCorrectAnswer) {
-                        bgColor = 'bg-green-100';
-                        textColor = 'text-green-800';
-                        borderColor = 'border-green-300';
-                      } else if (isUserAnswer && !isCorrect) {
-                        bgColor = 'bg-red-100';
-                        textColor = 'text-red-800';
-                        borderColor = 'border-red-300';
-                      }
-                      
-                      return (
-                        <div 
-                          key={idx} 
-                          className={`p-2 rounded border ${bgColor} ${textColor} ${borderColor}`}
-                        >
-                          <span className="font-medium">{String.fromCharCode(65 + idx)}</span> {c}
-                          {isCorrectAnswer && <span className="ml-2">✓</span>}
-                          {isUserAnswer && !isCorrectAnswer && <span className="ml-2">✗</span>}
-                        </div>
-                      );
-                    })}
+                  <div className="space-y-2 mb-3">
+                    <div className={`p-2 rounded border ${isCorrect ? 'bg-green-100 text-green-800 border-green-300' : 'bg-red-100 text-red-800 border-red-300'}`}>
+                      <strong>Votre réponse:</strong> {detail.user_answer}
+                      {isCorrect ? ' ✓' : ' ✗'}
+                    </div>
+                    {!isCorrect && (
+                      <div className="p-2 rounded border bg-green-100 text-green-800 border-green-300">
+                        <strong>Réponse correcte:</strong> {detail.correct_answer} ✓
+                      </div>
+                    )}
                   </div>
 
-                  {q.explanation && (
+                  {detail.explanation && (
                     <div className="text-sm text-slate-600 bg-slate-50 p-3 rounded border-l-4 border-blue-400">
-                      <strong>Explication:</strong> {q.explanation}
+                      <strong>Explication:</strong> {detail.explanation}
+                    </div>
+                  )}
+                  
+                  {detail.skill_area && (
+                    <div className="mt-2 text-xs text-slate-500">
+                      Compétence: {detail.skill_area}
                     </div>
                   )}
                 </div>
@@ -335,13 +324,8 @@ export default function QuizSection() {
               Revoir les questions
             </button>
           </div>
-
-
         </div>
       )}
-
-      
     </div>
-
   );
 }

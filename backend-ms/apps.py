@@ -1,4 +1,4 @@
-# apps.py
+
 import os
 import json
 from datetime import datetime, timezone, timedelta
@@ -14,8 +14,19 @@ from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
 import google.generativeai as genai
+from models.result import (
+    create_result, 
+    create_quiz_result, 
+    create_quiz_evaluation_result,
+    create_formation_recommendations_result,
+    get_latest_result,
+    SUPPORTED_RESULT_TYPES
+)
 
-# --- Vos modules locaux (gardez vos implémentations existantes) ---
+import requests
+from typing import List, Dict, Any, Optional
+import re
+
 from cv_parsing.extractors import extract_text
 from cv_parsing.gemini_parser import parse_cv_with_gemini
 from cv_parsing.job_parsing import parse_job
@@ -50,17 +61,17 @@ gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 # Similarity model
 try:
     similarity_calculator = CVJobEmbeddingSimilarity(model_type="sentence_transformer")
-    print("✅ SentenceTransformer chargé")
+    print("SentenceTransformer chargé")
 except Exception as e:
-    print(f"❌ Erreur modèle similarité: {e}")
+    print(f" Erreur modèle similarité: {e}")
     similarity_calculator = None
 
 # Quiz generator
 try:
     quiz_generator = QuizGenerator(gemini_model)
-    print("✅ Générateur de quiz prêt")
+    print(" Générateur de quiz prêt")
 except Exception as e:
-    print(f"❌ Erreur générateur quiz: {e}")
+    print(f" Erreur générateur quiz: {e}")
     quiz_generator = None
 
 # -------------------- HELPERS GÉNÉRAUX --------------------
@@ -77,12 +88,37 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def save_result_to_db(user_id, result_type, data, meta=None, refs=None):
+    """
+    Sauvegarde un résultat en base avec validation du type
+    """
     try:
-        result = create_result(user_id, result_type, data, meta, refs)
-        db.results.insert_one(result)
-        print(f"✅ Résultat {result_type} sauvegardé")
+        # Utiliser les fonctions spécialisées pour certains types
+        if result_type == "quiz":
+            result = create_quiz_result(user_id, data, meta)
+        elif result_type == "quiz_evaluation":
+            result = create_quiz_evaluation_result(user_id, data, meta, refs)
+        elif result_type == "formation_recommendations":
+            result = create_formation_recommendations_result(user_id, data, meta)
+        else:
+            # Fonction générique pour les autres types
+            result = create_result(user_id, result_type, data, meta, refs)
+        
+        # Insertion en base
+        inserted = db.results.insert_one(result)
+        
+        print(f" Résultat {result_type} sauvegardé (ID: {inserted.inserted_id})")
+        
+        # Log détaillé pour quiz_evaluation
+        if result_type == "quiz_evaluation":
+            score = data.get("percentage", 0)
+            total_q = data.get("total", 0)
+            print(f"    Score quiz: {score}% ({data.get('score', 0)}/{total_q})")
+        
+        return inserted.inserted_id
+        
     except Exception as e:
-        print(f"❌ Erreur save_result: {e}")
+        print(f" Erreur save_result_to_db ({result_type}): {e}")
+        return None
 
 def generate_feedback(percentage: float, detailed_results: list) -> dict:
     if percentage >= 80:
@@ -172,294 +208,422 @@ def build_profile_card(user_doc: Dict[str, Any], stats: Dict[str, Any]) -> Dict[
         "bullets": bullets,
         "updatedAt": datetime.utcnow().isoformat() + "Z"
     }
-    
-## user profile page
-# @app.route('/api/user/profile', methods=['PUT'])
-# @jwt_required()
-# def update_user_profile():
-#     try:
-#         data = request.get_json() or {}
-#         user_id = get_jwt_identity()
-#         obj_id = ObjectId(user_id)
-        
-#         # Mise à jour des champs autorisés
-#         update_fields = {}
-#         allowed_fields = ['firstName', 'lastName', 'phone', 'location', 'bio', 'avatar']
-        
-#         for field in allowed_fields:
-#             if field in data:
-#                 update_fields[field] = data[field]
-        
-#         result = users_collection.update_one(
-#             {'_id': obj_id}, 
-#             {'$set': update_fields}
-#         )
-        
-#         if result.modified_count > 0:
-#             return jsonify({'success': True, 'message': 'Profil mis à jour'})
-#         else:
-#             return jsonify({'success': True, 'message': 'Aucune modification détectée'})
-#     except Exception as e:
-#         return jsonify({'success': False, 'error': str(e)}), 500
-    
-# Mettez à jour la route PUT existante dans apps.py pour retourner l'utilisateur mis à jour
 
-@app.route('/api/user/profile', methods=['PUT'])
-@jwt_required()
-def update_user_profile():
-    try:
-        data = request.get_json() or {}
-        user_id = get_jwt_identity()
-        obj_id = ObjectId(user_id)
-        
-        # Mise à jour des champs autorisés
-        update_fields = {}
-        allowed_fields = ['firstName', 'lastName', 'phone', 'location', 'bio', 'avatar']
-        
-        for field in allowed_fields:
-            if field in data:
-                update_fields[field] = data[field]
-        
-        # Ajout du timestamp de mise à jour
-        update_fields['updatedAt'] = datetime.now(timezone.utc).isoformat()
-        
-        result = users_collection.update_one(
-            {'_id': obj_id}, 
-            {'$set': update_fields}
-        )
-        
-        if result.modified_count > 0:
-            # Récupère l'utilisateur mis à jour
-            updated_user = users_collection.find_one(
-                {'_id': obj_id}, 
-                {'password': 0}
-            )
-            if updated_user:
-                updated_user['_id'] = str(updated_user['_id'])
-            
-            return jsonify({
-                'success': True, 
-                'message': 'Profil mis à jour',
-                'user': updated_user
-            })
-        else:
-            return jsonify({
-                'success': True, 
-                'message': 'Aucune modification détectée'
-            })
-    except Exception as e:
-        return jsonify({
-            'success': False, 
-            'error': str(e)
-        }), 500
-
-
-@app.route('/api/user/profile', methods=['GET'])
-@jwt_required()
-def get_user_profile():
-    """
-    Récupère le profil complet de l'utilisateur connecté
-    """
-    try:
-        user_id = get_jwt_identity()
-        obj_id = ObjectId(user_id)
-        
-        # Récupère l'utilisateur sans le mot de passe
-        user = users_collection.find_one(
-            {'_id': obj_id}, 
-            {'password': 0}  # Exclut le champ password
-        )
-        
-        if not user:
-            return jsonify({
-                'success': False, 
-                'error': 'Utilisateur non trouvé'
-            }), 404
-        
-        # Convertit ObjectId en string pour le JSON
-        user['_id'] = str(user['_id'])
-        
-        # Structure la réponse avec tous les champs possibles
-        profile_data = {
-            'id': user['_id'],
-            'email': user.get('email', ''),
-            'firstName': user.get('firstName', ''),
-            'lastName': user.get('lastName', ''),
-            'phone': user.get('phone', ''),
-            'location': user.get('location', ''),
-            'bio': user.get('bio', ''),
-            'avatar': user.get('avatar', None),
-            'createdAt': user.get('createdAt', ''),
-            'updatedAt': user.get('updatedAt', ''),
-            # Ajoutez d'autres champs selon vos besoins
-        }
-        
-        return jsonify({
-            'success': True, 
-            'user': profile_data
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'success': False, 
-            'error': f'Erreur lors de la récupération du profil: {str(e)}'
-        }), 500    
-    
-    
 # -------------------- HELPERS RECOMMANDATIONS --------------------
-def _norm_list(x):
-    return x if isinstance(x, list) else (x or [])
-
-KNOWN_CERTS = {
-    "aws": [
-        {"certification": "AWS Certified Cloud Practitioner", "priority": "Moyenne", "relevance": "AWS"},
-        {"certification": "AWS Solutions Architect – Associate", "priority": "Haute", "relevance": "AWS"},
-    ],
-    "azure": [
-        {"certification": "Microsoft Azure Fundamentals (AZ-900)", "priority": "Moyenne", "relevance": "Azure"},
-        {"certification": "Azure Administrator Associate (AZ-104)", "priority": "Haute", "relevance": "Azure"},
-    ],
-    "gcp": [{"certification": "Google Associate Cloud Engineer", "priority": "Moyenne", "relevance": "GCP"}],
-    "kubernetes": [{"certification": "CKA - Certified Kubernetes Administrator", "priority": "Haute", "relevance": "Kubernetes"}],
-    "docker": [{"certification": "Docker Certified Associate", "priority": "Moyenne", "relevance": "Docker"}],
-    "elastic": [{"certification": "Elastic Certified Engineer", "priority": "Haute", "relevance": "ELK Stack"}],
-    "elk": [{"certification": "Elastic Certified Engineer", "priority": "Haute", "relevance": "ELK Stack"}],
-    "oracle": [{"certification": "Oracle Certified Professional, SQL and PL/SQL", "priority": "Haute", "relevance": "Oracle/SQL"}],
-    "sql": [{"certification": "Oracle Certified Professional, SQL and PL/SQL", "priority": "Haute", "relevance": "SQL"}],
-    "java": [
-        {"certification": "Oracle Certified Associate, Java SE Programmer", "priority": "Haute", "relevance": "Java"},
-        {"certification": "Oracle Certified Professional, Java SE Programmer", "priority": "Moyenne", "relevance": "Java"},
-    ],
-    "python": [{"certification": "PCAP – Certified Associate in Python Programming", "priority": "Moyenne", "relevance": "Python"}],
-}
-
-def suggest_certs_for_skills(skills):
-    out = []
-    for s in skills:
-        key = str(s).lower()
-        added = False
-        for k, certs in KNOWN_CERTS.items():
-            if k in key:
-                out.extend(certs); added = True; break
-        if not added:
-            out.append({"certification": f"Certification {s}", "priority": "Moyenne", "relevance": str(s)})
-    # unicité
-    seen = set(); uniq = []
-    for c in out:
-        name = c.get("certification") or c.get("title") or c.get("name")
-        if name and name not in seen:
-            uniq.append(c); seen.add(name)
-    return uniq[:8]
-
-def suggest_projects_for_skills(skills):
-    ideas = []
-    for s in skills:
-        t = str(s); low = t.lower()
-        if "java" in low or "j2ee" in low:
-            ideas.append("Application J2EE (CRUD + Auth + Tests)")
-        elif "elk" in low or "elastic" in low:
-            ideas.append("Analyse de logs avec ELK Stack (Filebeat → Logstash → ES → Kibana)")
-        elif "sql" in low or "oracle" in low:
-            ideas.append("Optimisation de requêtes SQL et modélisation relationnelle")
-        elif "kubernetes" in low:
-            ideas.append("Déploiement applicatif sur Kubernetes (Ingress, HPA, ConfigMaps)")
-        elif "docker" in low:
-            ideas.append("Containerisation d’un microservice + CI/CD")
-        elif "aws" in low:
-            ideas.append("Serverless sur AWS (API Gateway + Lambda + DynamoDB)")
-        else:
-            ideas.append(f"Mini-projet appliquant {t}")
-    # unicité
-    seen = set(); uniq = []
-    for p in ideas:
-        if p not in seen:
-            uniq.append(p); seen.add(p)
-    return uniq[:8]
-
-def _ordered_unique(seq):
-    seen = set()
-    out = []
-    for x in seq:
-        k = str(x).strip().lower()
-        if k and k not in seen:
-            out.append(str(x).strip())
-            seen.add(k)
-    return out
-
-def build_recommendations_from_match_and_quiz(match: Dict[str, Any], quiz_eval: Dict[str, Any]) -> Dict[str, Any]:
+def get_user_context(user_id: str) -> Dict[str, Any]:
     """
-    Construit des recommandations à partir:
-      - match: résultat du /api/match (missing_keywords, weak_areas, skill_analysis, parsed_job, score...)
-      - quiz_eval: résultat du /api/quiz/evaluate (detailed_results, percentage...)
-    Priorité: missing_keywords (JD), weak_areas (matching), erreurs quiz (skill_area),
-              puis skills faibles détectés (skill_analysis.low_job_skill_matches).
+    Récupère tout le contexte utilisateur : CV, job, matching, quiz
     """
-    missing = _norm_list((match or {}).get("missing_keywords"))
-    weak_areas = _norm_list((match or {}).get("weak_areas"))
-    skill_analysis = (match or {}).get("skill_analysis", {}) or {}
-    parsed_job = (match or {}).get("parsed_job", {}) or {}
-
-    low_job_skill_matches = _norm_list(skill_analysis.get("low_job_skill_matches"))  # liste de dicts?
-    low_job_skills = []
-    for item in low_job_skill_matches:
-        if isinstance(item, dict):
-            name = _first_non_empty(item.get("job_skill"), item.get("skill"), item.get("name"))
-            if name: low_job_skills.append(name)
-        elif isinstance(item, str):
-            low_job_skills.append(item)
-
-    # Erreurs quiz -> skill areas ratées
-    quiz_bad_areas = []
-    if quiz_eval:
-        for dr in _norm_list(quiz_eval.get("detailed_results")):
-            if not dr.get("is_correct"):
-                area = dr.get("skill_area")
-                if area: quiz_bad_areas.append(area)
-
-    # Fallback côté JD si peu d'éléments
-    jd_required = _norm_list(parsed_job.get("required_skills"))[:5]
-
-    # Construction d'une liste pondérée puis dédoublonnée en conservant l'ordre
-    priority_stack = []
-    priority_stack += [f"{s}" for s in missing] * 3           # très prioritaire
-    priority_stack += [f"{s}" for s in weak_areas] * 2        # prioritaire
-    priority_stack += [f"{s}" for s in quiz_bad_areas] * 2    # prioritaire (quiz)
-    priority_stack += [f"{s}" for s in low_job_skills]        # utile
-    if not priority_stack:
-        priority_stack += [f"{s}" for s in jd_required]
-
-    focus_skills = _ordered_unique(priority_stack)[:10]
-
-    # Génération des recos
-    certifications = suggest_certs_for_skills(focus_skills)
-    projects = suggest_projects_for_skills(focus_skills)
-    learning_plan = [
-        "S1 : Reprendre les bases des 2–3 compétences les plus faibles.",
-        "S2 : Mise en pratique guidée (exos ciblés) + flashcards.",
-        "S3 : Mini-projet tiré de la JD, code revu.",
-        "S4 : Quiz de consolidation sur ces compétences.",
-        "S5 : Préparation certification (banque de questions)."
-    ]
-
-    # Contexte & métriques
-    rationale = {
-        "matching_score": (match or {}).get("score"),
-        "quiz_percentage": (quiz_eval or {}).get("percentage") if quiz_eval else None,
-        "used_signals": {
-            "missing_keywords": missing,
-            "weak_areas": weak_areas,
-            "quiz_incorrect_areas": quiz_bad_areas,
-            "low_job_skills": low_job_skills
+    try:
+        obj_id = ObjectId(user_id)
+        
+        # Récupération des données les plus récentes
+        latest_cv = db.results.find_one({"user": obj_id, "type": "cv"}, sort=[("createdAt", -1)])
+        latest_job = db.results.find_one({"user": obj_id, "type": "job"}, sort=[("createdAt", -1)])
+        latest_match = db.results.find_one({"user": obj_id, "type": "matching"}, sort=[("createdAt", -1)])
+        latest_quiz = db.results.find_one({"user": obj_id, "type": "quiz_evaluation"}, sort=[("createdAt", -1)])
+        user_profile = users_collection.find_one({'_id': obj_id}, {'password': 0})
+        
+        context = {
+            "user_profile": user_profile,
+            "cv_data": None,
+            "job_data": None,
+            "matching_data": None,
+            "quiz_data": None,
+            "user_name": None
         }
-    }
+        
+        # Extraction du nom utilisateur
+        if user_profile:
+            context["user_name"] = " ".join(filter(None, [
+                user_profile.get("firstName"), 
+                user_profile.get("lastName")
+            ])).strip() or "l'utilisateur"
+        
+        # Données CV
+        if latest_cv and latest_cv.get("data"):
+            cv_data = latest_cv["data"]
+            if isinstance(cv_data, dict) and "parsed_cv" in cv_data:
+                cv_data = cv_data["parsed_cv"]
+            context["cv_data"] = cv_data
+            # Si pas de nom du profil, utiliser celui du CV
+            if not context["user_name"] and cv_data.get("name"):
+                context["user_name"] = cv_data["name"]
+        
+        # Données Job
+        if latest_job and latest_job.get("data"):
+            context["job_data"] = latest_job["data"]
+        
+        # Données Matching
+        if latest_match and latest_match.get("data"):
+            context["matching_data"] = latest_match["data"]
+        
+        # Données Quiz
+        if latest_quiz and latest_quiz.get("data"):
+            context["quiz_data"] = latest_quiz["data"]
+        
+        return context
+        
+    except Exception as e:
+        print(f"Erreur get_user_context: {e}")
+        return {"user_name": "l'utilisateur"}
 
-    return {
-        "focus_skills": focus_skills,
-        "certifications": certifications,
-        "projects": projects,
-        "learning_plan": learning_plan,
-        "rationale": rationale
-    }
+def build_rich_context_prompt(context: Dict[str, Any]) -> str:
+    """
+    Construit un prompt riche avec toutes les informations utilisateur
+    """
+    user_name = context.get("user_name", "l'utilisateur")
+    cv_data = context.get("cv_data")
+    job_data = context.get("job_data")
+    matching_data = context.get("matching_data")
+    quiz_data = context.get("quiz_data")
+    
+    prompt_parts = [
+        f"Tu es TalentIA, l'assistant IA spécialisé en recrutement de {user_name}.",
+        "Tu réponds en FRANÇAIS, de façon claire, personnalisée et bienveillante.",
+        f"Tu connais {user_name} et ses informations professionnelles.",
+    ]
+    
+    # Informations CV
+    if cv_data:
+        cv_info = []
+        if cv_data.get("name"):
+            cv_info.append(f"Nom: {cv_data['name']}")
+        if cv_data.get("skills"):
+            skills_str = ", ".join(str(s) for s in cv_data["skills"][:8])
+            cv_info.append(f"Compétences principales: {skills_str}")
+        if cv_data.get("experience"):
+            exp = cv_data["experience"]
+            if isinstance(exp, list) and exp:
+                last_exp = exp[0]
+                title = _first_non_empty(last_exp.get("job_title"), last_exp.get("title"), last_exp.get("role"))
+                company = _first_non_empty(last_exp.get("company"), last_exp.get("company_name"))
+                if title or company:
+                    cv_info.append(f"Dernière expérience: {title or 'Poste'} chez {company or 'Entreprise'}")
+        if cv_data.get("education"):
+            edu = cv_data["education"]
+            if isinstance(edu, list) and edu:
+                degree = _first_non_empty(edu[0].get("degree"), edu[0].get("diploma"))
+                if degree:
+                    cv_info.append(f"Formation: {degree}")
+        
+        if cv_info:
+            prompt_parts.append(f"\n=== PROFIL DE {user_name.upper()} ===")
+            prompt_parts.extend(cv_info)
+    
+    # Informations Job
+    if job_data:
+        job_info = []
+        if job_data.get("title"):
+            job_info.append(f"Poste visé: {job_data['title']}")
+        if job_data.get("company"):
+            job_info.append(f"Entreprise: {job_data['company']}")
+        if job_data.get("required_skills"):
+            req_skills = ", ".join(str(s) for s in job_data["required_skills"][:6])
+            job_info.append(f"Compétences requises: {req_skills}")
+        if job_data.get("location"):
+            job_info.append(f"Lieu: {job_data['location']}")
+        
+        if job_info:
+            prompt_parts.append(f"\n=== OFFRE D'EMPLOI ANALYSÉE ===")
+            prompt_parts.extend(job_info)
+    
+    # Résultats de matching
+    if matching_data:
+        score = matching_data.get("score", 0)
+        missing_keywords = matching_data.get("missing_keywords", [])
+        weak_areas = matching_data.get("weak_areas", [])
+        
+        match_info = [f"Score de compatibilité: {score:.1f}%"]
+        if missing_keywords:
+            match_info.append(f"Compétences manquantes: {', '.join(str(s) for s in missing_keywords[:5])}")
+        if weak_areas:
+            match_info.append(f"Points d'amélioration: {', '.join(str(s) for s in weak_areas[:3])}")
+        
+        prompt_parts.append(f"\n=== RÉSULTATS D'ANALYSE ===")
+        prompt_parts.extend(match_info)
+    
+    # Résultats de quiz
+    if quiz_data:
+        percentage = quiz_data.get("percentage", 0)
+        detailed_results = quiz_data.get("detailed_results", [])
+        wrong_areas = [r.get("skill_area") for r in detailed_results if not r.get("is_correct")]
+        
+        quiz_info = [f"Score au quiz: {percentage:.1f}%"]
+        if wrong_areas:
+            wrong_unique = list(dict.fromkeys(wrong_areas))[:3]  # Supprime doublons
+            quiz_info.append(f"Domaines à travailler: {', '.join(wrong_unique)}")
+        
+        prompt_parts.append(f"\n=== ÉVALUATION DES CONNAISSANCES ===")
+        prompt_parts.extend(quiz_info)
+    
+    prompt_parts.append(f"\nUtilise ces informations pour personnaliser tes réponses et aider {user_name} dans sa recherche d'emploi.")
+    
+    return "\n".join(prompt_parts)
+
+# -------------------- API FORMATIONS --------------------
+
+
+
+def generate_ai_only_formation_recommendations(context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Génère des recommandations de formation UNIQUEMENT avec l'IA Gemini
+    """
+    try:
+        user_name = context.get("user_name", "l'utilisateur")
+        cv_data = context.get("cv_data")
+        job_data = context.get("job_data") 
+        matching_data = context.get("matching_data")
+        quiz_data = context.get("quiz_data")
+        
+        # Construction du prompt détaillé
+        prompt_parts = [
+            f"Tu es un expert en formation professionnelle et en développement de carrière.",
+            f"Analyse le profil complet de {user_name} et génère des recommandations de formation personnalisées.",
+            f"",
+            f"=== PROFIL UTILISATEUR : {user_name} ===",
+        ]
+        
+        # Informations du CV
+        if cv_data:
+            prompt_parts.append(" INFORMATIONS CV :")
+            
+            if cv_data.get("name"):
+                prompt_parts.append(f"• Nom : {cv_data['name']}")
+            
+            # Compétences actuelles
+            if cv_data.get("skills"):
+                skills_list = ", ".join(str(s) for s in cv_data["skills"][:10])
+                prompt_parts.append(f"• Compétences actuelles : {skills_list}")
+            
+            # Expérience
+            if cv_data.get("experience") and isinstance(cv_data["experience"], list):
+                exp = cv_data["experience"]
+                if exp:
+                    last_exp = exp[0]
+                    title = _first_non_empty(last_exp.get("job_title"), last_exp.get("title"), last_exp.get("role"))
+                    company = _first_non_empty(last_exp.get("company"), last_exp.get("company_name"))
+                    duration = last_exp.get("duration", "")
+                    if title:
+                        exp_info = f"• Dernière expérience : {title}"
+                        if company:
+                            exp_info += f" chez {company}"
+                        if duration:
+                            exp_info += f" ({duration})"
+                        prompt_parts.append(exp_info)
+            
+            # Formation
+            if cv_data.get("education") and isinstance(cv_data["education"], list):
+                edu = cv_data["education"]
+                if edu:
+                    degree = _first_non_empty(edu[0].get("degree"), edu[0].get("diploma"))
+                    if degree:
+                        prompt_parts.append(f"• Formation actuelle : {degree}")
+        
+        # Informations du poste visé
+        if job_data:
+            prompt_parts.append("")
+            prompt_parts.append(" POSTE VISÉ :")
+            
+            if job_data.get("title"):
+                prompt_parts.append(f"• Titre : {job_data['title']}")
+            
+            if job_data.get("company"):
+                prompt_parts.append(f"• Entreprise : {job_data['company']}")
+                
+            if job_data.get("required_skills"):
+                req_skills = ", ".join(str(s) for s in job_data["required_skills"][:8])
+                prompt_parts.append(f"• Compétences requises : {req_skills}")
+            
+            if job_data.get("responsibilities"):
+                resp = "; ".join(str(r) for r in job_data["responsibilities"][:3])
+                prompt_parts.append(f"• Responsabilités principales : {resp}")
+        
+        # Résultats de matching CV/Job
+        if matching_data:
+            prompt_parts.append("")
+            prompt_parts.append("ANALYSE DE COMPATIBILITÉ CV/JOB :")
+            
+            score = matching_data.get("score", 0)
+            prompt_parts.append(f"• Score de compatibilité : {score:.1f}%")
+            
+            missing_keywords = matching_data.get("missing_keywords", [])
+            if missing_keywords:
+                missing_str = ", ".join(str(k) for k in missing_keywords[:6])
+                prompt_parts.append(f"• Compétences manquantes CRITIQUES : {missing_str}")
+            
+            weak_areas = matching_data.get("weak_areas", [])
+            if weak_areas:
+                weak_str = ", ".join(str(w) for w in weak_areas[:4])
+                prompt_parts.append(f"• Domaines faibles identifiés : {weak_str}")
+        
+        # Résultats du quiz technique
+        if quiz_data:
+            prompt_parts.append("")
+            prompt_parts.append(" ÉVALUATION TECHNIQUE (QUIZ) :")
+            
+            percentage = quiz_data.get("percentage", 0)
+            prompt_parts.append(f"• Score obtenu : {percentage:.1f}%")
+            
+            detailed_results = quiz_data.get("detailed_results", [])
+            if detailed_results:
+                # Compétences échouées
+                failed_skills = []
+                correct_skills = []
+                
+                for result in detailed_results:
+                    skill_area = result.get("skill_area", "Général")
+                    if result.get("is_correct"):
+                        correct_skills.append(skill_area)
+                    else:
+                        failed_skills.append(skill_area)
+                
+                # Supprimer les doublons en préservant l'ordre
+                unique_failed = list(dict.fromkeys(failed_skills))
+                unique_correct = list(dict.fromkeys(correct_skills))
+                
+                if unique_failed:
+                    failed_str = ", ".join(unique_failed[:5])
+                    prompt_parts.append(f"• Compétences techniques ÉCHOUÉES : {failed_str}")
+                
+                if unique_correct:
+                    correct_str = ", ".join(unique_correct[:5])
+                    prompt_parts.append(f"• Compétences techniques MAÎTRISÉES : {correct_str}")
+        
+        # Instructions pour l'IA
+        prompt_parts.extend([
+            "",
+            "=== MISSION ===",
+            f"Basé sur cette analyse complète de {user_name}, génère des recommandations de formation TRÈS personnalisées :",
+            "",
+            "1. IDENTIFIE les 3-5 compétences les PLUS PRIORITAIRES à développer",
+            "2. Pour chaque compétence, PROPOSE une formation spécifique avec :",
+            "   - Nom exact de la formation",
+            "   - Organisme/plateforme (ex: OpenClassrooms, Coursera, Udemy, LinkedIn Learning, FUN MOOC, etc.)",
+            "   - URL si tu la connais",
+            "   - Durée estimée",
+            "   - Niveau requis",
+            "   - Justification personnalisée",
+            "",
+            "3. PRIORISE les formations selon :",
+            f"   - Les lacunes identifiées dans le quiz de {user_name}",
+            f"   - Les compétences manquantes pour le poste visé",
+            f"   - Le niveau actuel de {user_name}",
+            "",
+            "4. VARIE les types de formations :",
+            "   - Formations techniques (programmation, outils)",
+            "   - Certifications professionnelles", 
+            "   - Soft skills si nécessaire",
+            "",
+            "5. ADAPTE selon le domaine détecté :",
+            "   - Si IT : formations en programmation, DevOps, data, cybersécurité...",
+            "   - Si Marketing : formations en digital marketing, analytics, design...",
+            "   - Si Finance : formations en analyse financière, Excel, Power BI...",
+            "   - Si RH : formations en gestion des talents, droit social...",
+            "   - Etc.",
+            "",
+            "RÉPONDS en JSON avec cette structure exacte :",
+            """{
+    "user_analysis": {
+        "name": "...",
+        "current_domain": "...",
+        "experience_level": "débutant/intermédiaire/expert",
+        "target_role": "...",
+        "main_gaps": ["gap1", "gap2", "gap3"]
+    },
+    "priority_skills": [
+        {
+            "skill": "nom_competence",
+            "priority": "haute/moyenne/basse",
+            "reason": "justification personnalisée"
+        }
+    ],
+    "formations": [
+        {
+            "title": "nom exact de la formation",
+            "provider": "organisme",
+            "url": "lien si connu ou null",
+            "duration": "durée estimée",
+            "level": "niveau requis", 
+            "target_skills": ["skill1", "skill2"],
+            "justification": "pourquoi cette formation pour ce profil",
+            "priority": "haute/moyenne/basse"
+        }
+    ]
+}""",
+            "",
+            f"IMPORTANT : Sois très spécifique et personnalisé pour {user_name}. Évite les recommandations génériques !"
+        ])
+        
+        ai_prompt = "\n".join(prompt_parts)
+        
+        # Appel à Gemini
+        response = gemini_model.generate_content(ai_prompt)
+        ai_response = response.text.strip()
+        
+        # Parsing du JSON
+        import json
+        import re
+        
+        try:
+            # Extraire le JSON de la réponse
+            json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+            if json_match:
+                ai_recommendations = json.loads(json_match.group())
+            else:
+                # Tenter de parser toute la réponse
+                ai_recommendations = json.loads(ai_response)
+        except json.JSONDecodeError as e:
+            print(f" Erreur parsing JSON : {e}")
+            print(f"Réponse IA : {ai_response[:500]}...")
+            
+            # Fallback avec extraction manuelle
+            ai_recommendations = {
+                "user_analysis": {
+                    "name": user_name,
+                    "current_domain": "Non déterminé",
+                    "experience_level": "intermédiaire",
+                    "target_role": "Poste recherché",
+                    "main_gaps": ["Compétences techniques", "Certification", "Expérience pratique"]
+                },
+                "priority_skills": [
+                    {"skill": "Compétence principale", "priority": "haute", "reason": "Identifiée par l'analyse"}
+                ],
+                "formations": [],
+                "ai_response_raw": ai_response  # Pour debug
+            }
+        
+        # Validation et enrichissement
+        formations = ai_recommendations.get("formations", [])
+        priority_skills = ai_recommendations.get("priority_skills", [])
+        user_analysis = ai_recommendations.get("user_analysis", {})
+        
+        return {
+            "success": True,
+            "user_name": user_name,
+            "user_analysis": user_analysis,
+            "priority_skills": [skill.get("skill") for skill in priority_skills],
+            "formations": formations,
+            "context_used": {
+                "has_cv": bool(cv_data),
+                "has_job": bool(job_data),
+                "has_matching": bool(matching_data),
+                "has_quiz": bool(quiz_data),
+                "quiz_score": quiz_data.get("percentage", 0) if quiz_data else 0,
+                "matching_score": matching_data.get("score", 0) if matching_data else 0
+            },
+            "ai_response_raw": ai_response  # Pour debug si nécessaire
+        }
+        
+    except Exception as e:
+        print(f"Erreur génération recommandations IA : {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "user_name": context.get("user_name", "l'utilisateur"),
+            "priority_skills": [],
+            "formations": []
+        }    
 
 # -------------------- AUTH --------------------
 @app.route('/api/auth/register', methods=['POST'])
@@ -517,13 +681,28 @@ def get_me():
 def home():
     return jsonify({'message': 'Serveur de matching CV actif',
                     'status': 'ok',
-                    'endpoints': ['/api/upload','/api/parse-cv','/api/parse-job','/api/match','/api/assistant/cards','/api/assistant/recommendations','/api/chat','/api/quiz']})
+                    'endpoints': ['/api/upload','/api/parse-cv','/api/parse-job','/api/match','/api/assistant/cards','/api/assistant/recommendations','/api/chat','/api/quiz','/api/formations/recommend']})
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok',
                     'model_available': bool(similarity_calculator and getattr(similarity_calculator, 'model', None)),
                     'model_type': getattr(similarity_calculator, 'model_type', 'none')})
+
+@app.route('/api/debug/routes', methods=['GET'])
+def debug_routes():
+    routes = []
+    for rule in app.url_map.iter_rules():
+        routes.append({
+            "endpoint": rule.endpoint,
+            "methods": list(rule.methods),
+            "rule": str(rule)
+        })
+    return jsonify({"routes": routes})
+
+@app.route('/api/formations/test', methods=['GET'])
+def test_formations():
+    return jsonify({"message": "Endpoint formations actif", "available_routes": ["/api/formations/recommend", "/api/formations/search"]})
 
 # Upload/extraction texte
 @app.route('/api/upload', methods=['POST'])
@@ -651,16 +830,9 @@ def calculate_matching():
             'success': True
         }
 
-        # ---- Recommandations (basées sur matching + quiz) ----
-        user_id = get_jwt_identity()
-        latest_quiz_eval = db.results.find_one({"user": ObjectId(user_id), "type": "quiz_evaluation"}, sort=[("createdAt", -1)])
-        quiz_payload = (latest_quiz_eval or {}).get("data")
-        recommendations = build_recommendations_from_match_and_quiz(matching_data, quiz_payload)
-        matching_data["recommendations"] = recommendations
-
         # save
         save_result_to_db(
-            user_id=user_id,
+            user_id=get_jwt_identity(),
             result_type="matching",
             data=matching_data,
             meta={"model_used": sim.get("model_used", "sentence_transformer"),
@@ -714,85 +886,116 @@ def get_assistant_cards():
     except Exception as e:
         return jsonify({"success": False, "error": f"Erreur assistant: {e}"}), 500
 
-# Recommandations (appelées depuis ChatSection bouton "Recos")
-@app.route('/api/assistant/recommendations', methods=['GET'])
-@jwt_required()
-def assistant_recommendations():
-    try:
-        user_id = get_jwt_identity()
-        oid = ObjectId(user_id)
-
-        latest_match = db.results.find_one({"user": oid, "type": "matching"}, sort=[("createdAt", -1)])
-        latest_quiz_eval = db.results.find_one({"user": oid, "type": "quiz_evaluation"}, sort=[("createdAt", -1)])
-
-        if not latest_match:
-            return jsonify({"success": False, "error": "Aucun résultat de matching trouvé. Lancez d'abord une analyse de compatibilité."}), 400
-
-        mdata = latest_match.get("data", {}) or {}
-        recos = mdata.get("recommendations")
-
-        # Si pas de recos sauvegardées ou si l’on veut rafraîchir avec le quiz le plus récent, on recalcule
-        quiz_payload = (latest_quiz_eval or {}).get("data")
-        if not recos:
-            recos = build_recommendations_from_match_and_quiz(mdata, quiz_payload)
-
-        messages = []
-        if recos.get("certifications"):
-            messages.append({"type": "certs", "items": recos["certifications"]})
-        if recos.get("projects"):
-            messages.append({"type": "projects", "items": recos["projects"]})
-        if recos.get("learning_plan"):
-            messages.append({"type": "insight", "text": "Plan d’apprentissage disponible dans les recommandations."})
-        if recos.get("focus_skills"):
-            messages.append({"type": "focus", "items": recos["focus_skills"]})
-
-        return jsonify({"success": True, "messages": messages, "recommendations": recos})
-    except Exception as e:
-        return jsonify({"success": False, "error": f"Endpoint recommandations: {e}"}), 500
-
-# -------------------- CHAT --------------------
 @app.route('/api/chat', methods=['POST'])
 @jwt_required(optional=True)
 def chat_with_gemini():
+    """
+    Chat enrichi avec contexte complet utilisateur
+    """
     try:
         payload = request.get_json() or {}
         incoming = payload.get("messages", [])
-
-        sys = next((m.get("content") for m in incoming if m.get("role") == "system"), None)
-        system_instruction = sys or (
-            "Tu es un assistant utile spécialisé en recrutement. "
-            "Réponds en FRANÇAIS, de façon claire et concise. "
-            "Si la question concerne le candidat, appuie-toi sur le CV et la Job Description si disponibles."
-        )
-
+        
         user_id = get_jwt_identity()
-        ctx_lines = []
+        
+        # Construction du contexte riche
         if user_id:
-            obj_id = ObjectId(user_id)
-            latest_cv = db.results.find_one({"user": obj_id, "type": "cv"}, sort=[("createdAt", -1)])
-            latest_job = db.results.find_one({"user": obj_id, "type": "job"}, sort=[("createdAt", -1)])
-            if latest_cv and latest_cv.get("data"):
-                cv_data = latest_cv["data"].get("parsed_cv", latest_cv["data"])
-                cv_card = summarize_cv_for_card(cv_data)
-                ctx_lines.append(f"[CV] {cv_card['title']} — {cv_card['subtitle']}. " + " | ".join(cv_card.get("bullets", [])))
-            if latest_job and latest_job.get("data"):
-                job_card = summarize_job_for_card(latest_job["data"])
-                ctx_lines.append(f"[JOB] {job_card['title']} — {job_card['subtitle']}. " + " | ".join(job_card.get("bullets", [])))
-        context_blob = "\n".join(ctx_lines) if ctx_lines else ""
-
+            context = get_user_context(user_id)
+            system_instruction = build_rich_context_prompt(context)
+        else:
+            system_instruction = (
+                "Tu es TalentIA, un assistant IA spécialisé en recrutement. "
+                "Tu réponds en FRANÇAIS, de façon claire et concise. "
+                "L'utilisateur n'est pas connecté, encourage-le à se connecter pour un service personnalisé."
+            )
+        
+        # Construction de l'historique
         history = []
         for m in incoming:
-            role = m.get("role"); content = m.get("content", "")
-            if role == "user": history.append({"role": "user", "parts": [content]})
-            elif role == "assistant": history.append({"role": "model", "parts": [content]})
-
-        chat_model = genai.GenerativeModel("gemini-1.5-flash",
-                                           system_instruction=system_instruction + ("\n\nContexte:\n" + context_blob if context_blob else ""))
+            role = m.get("role")
+            content = m.get("content", "")
+            if role == "user":
+                history.append({"role": "user", "parts": [content]})
+            elif role == "assistant":
+                history.append({"role": "model", "parts": [content]})
+        
+        # Génération de la réponse
+        chat_model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=system_instruction)
         resp = chat_model.generate_content(history if history else [{"role": "user", "parts": ["Bonjour"]}])
+        
         text = (resp.text or "").strip() or "(Réponse vide)"
+        
         return jsonify({"message": {"role": "assistant", "content": text}, "success": True})
+        
     except Exception as e:
         return jsonify({"error": f"Erreur chat: {e}"}), 500
+
+# -------------------- FORMATIONS ENDPOINTS --------------------
+@app.route('/api/formations/recommend', methods=['POST'])
+@jwt_required()
+def formations_recommend_endpoint():
+    """
+    Génère des recommandations de formations personnalisées basées sur l'IA uniquement
+    """
+    try:
+        user_id = get_jwt_identity()
+        context = get_user_context(user_id)
+        
+        # Vérification des données minimales
+        has_data = any([
+            context.get("cv_data"),
+            context.get("job_data"), 
+            context.get("matching_data"),
+            context.get("quiz_data")
+        ])
+        
+        if not has_data:
+            return jsonify({
+                "success": False, 
+                "error": "Données insuffisantes. Veuillez :\n1. Uploader votre CV\n2. Analyser une offre d'emploi\n3. Passer un quiz technique"
+            }), 400
+        
+        # Génération avec IA uniquement
+        recommendations = generate_ai_only_formation_recommendations(context)
+        
+        if not recommendations.get("success"):
+            return jsonify({
+                "success": False,
+                "error": recommendations.get("error", "Erreur lors de la génération")
+            }), 500
+        
+        # Sauvegarde des recommandations
+        save_result_to_db(
+            user_id,
+            "formation_recommendations", 
+            recommendations,
+            meta={
+                "source": "ai_only_gemini", 
+                "formations_count": len(recommendations.get("formations", [])),
+                "context_score": {
+                    "quiz": recommendations.get("context_used", {}).get("quiz_score", 0),
+                    "matching": recommendations.get("context_used", {}).get("matching_score", 0)
+                }
+            },
+            refs={
+                "priority_skills_count": len(recommendations.get("priority_skills", [])),
+                "has_quiz_results": bool(context.get("quiz_data"))
+            }
+        )
+        
+        return jsonify({
+            "success": True,
+            "recommendations": recommendations
+        })
+        
+    except Exception as e:
+        print(f" Erreur dans formations_recommend_endpoint: {e}")
+        return jsonify({
+            "success": False, 
+            "error": f"Erreur serveur: {e}"
+        }), 500
+
+
 
 # -------------------- QUIZ --------------------
 # Helpers additionnels pour extraire proprement les compétences du CV
@@ -835,9 +1038,7 @@ def _pick_focus_skills_from_cv(parsed_cv: Dict[str, Any], max_n: int = 8) -> Lis
 @jwt_required()
 def generate_quiz():
     """
-    Génére un quiz ciblé SUR LES COMPÉTENCES DU CV.
-    - Échec si aucun CV n'est trouvé pour l'utilisateur.
-    - Utilise QuizGenerator avec focus_skills = compétences extraites du CV.
+    Génère un quiz ciblé SUR LES COMPÉTENCES DU CV.
     """
     data = request.get_json() or {}
     level = data.get('level', 'moyen')
@@ -847,18 +1048,17 @@ def generate_quiz():
     if not quiz_generator:
         return jsonify({'error': 'Générateur non disponible'}), 500
 
-    # 1) Récupère le dernier CV parsé enregistré pour l’utilisateur
+    # 1) Récupère le dernier CV parsé
     latest_cv_doc = db.results.find_one({"user": ObjectId(user_id), "type": "cv"}, sort=[("createdAt", -1)])
     if not latest_cv_doc or not latest_cv_doc.get("data"):
         return jsonify({
             'error': "Aucun CV trouvé. Veuillez uploader et parser votre CV avant de générer un quiz ciblé."
         }), 400
 
-    # Le CV peut être stocké sous data['parsed_cv'] ou directement data
     cv_data = latest_cv_doc["data"]
     parsed_cv = cv_data["parsed_cv"] if isinstance(cv_data, dict) and "parsed_cv" in cv_data else cv_data
 
-    # 2) Profil utilisateur basé sur le CV (pour contexte du générateur)
+    # 2) Profil utilisateur
     profile = {
         'name': parsed_cv.get('name', 'Candidat'),
         'skills': parsed_cv.get('skills', []),
@@ -868,27 +1068,25 @@ def generate_quiz():
         'certifications': parsed_cv.get('certifications', []),
     }
 
-    # 3) Déterminer les compétences ciblées (focus_skills) à partir du CV
+    # 3) Compétences ciblées
     focus_skills = _pick_focus_skills_from_cv(parsed_cv, max_n=8)
     if not focus_skills:
         return jsonify({
-            'error': "Votre CV ne contient pas de compétences exploitables. Veuillez vérifier l’extraction de votre CV."
+            'error': "Votre CV ne contient pas de compétences exploitables."
         }), 400
 
-    # 4) Niveaux mappés
+    # 4) Génération du quiz
     level_map = {'facile': 'débutant', 'moyen': 'intermédiaire', 'difficile': 'avancé'}
     mapped_level = level_map.get(level, 'intermédiaire')
 
-    # 5) Génération du quiz ciblé sur ces compétences
     try:
         quiz = quiz_generator.generate_quiz(
             user_profile=profile,
             level=mapped_level,
             num_questions=count,
-            focus_skills=focus_skills  # ⬅️ ciblage explicite sur les compétences du CV
+            focus_skills=focus_skills
         )
     except TypeError:
-        # Compat rétro si l’implémentation n’a pas encore le param focus_skills
         quiz = quiz_generator.generate_quiz(
             user_profile=profile,
             level=mapped_level,
@@ -898,7 +1096,7 @@ def generate_quiz():
     if not quiz:
         return jsonify({'error': 'Génération échouée'}), 500
 
-    # 6) Normalisation des questions (suppression des préfixes a), b) ...)
+    # 5) Normalisation des questions
     questions = []
     for i, q in enumerate(quiz.questions):
         clean_choices = [(opt.split(') ', 1)[1] if ') ' in opt else opt) for opt in q.options]
@@ -921,11 +1119,11 @@ def generate_quiz():
             'level': level,
             'profile_used': profile.get('name', 'Utilisateur'),
             'skills_detected': len(profile.get('skills', [])),
-            'focus_skills': focus_skills  # ⬅️ visible côté client si besoin
+            'focus_skills': focus_skills
         }
     }
 
-    # 7) Sauvegarde
+    # 6) Sauvegarde SANS score initial
     save_result_to_db(
         user_id,
         "quiz",
@@ -963,7 +1161,7 @@ def get_user_profile_from_cv(user_id):
                     'experience': [{'title': 'Expérience professionnelle', 'duration': 'Variable'}],
                     'languages': ['Français'], 'certifications': []}
     except Exception as e:
-        print(f"❌ Profil CV error: {e}")
+        print(f"Profil CV error: {e}")
         return {'name': 'Candidat', 'skills': ['JavaScript', 'Python', 'HTML', 'CSS', 'React'],
                 'education': [{'degree': 'Formation dev'}], 'experience': [{'title': 'Développeur', 'duration': '2 ans'}],
                 'languages': ['Français'], 'certifications': []}
@@ -987,48 +1185,103 @@ def get_quiz_profile_status():
                             'last_updated': None, 'recommendation': 'Uploadez votre CV pour des quiz personnalisés'})
     except Exception as e:
         return jsonify({'error': f'Erreur statut: {e}'}), 500
-
+    
 @app.route('/api/quiz/evaluate', methods=['POST'])
 @jwt_required()
 def evaluate_quiz():
     try:
         data = request.get_json() or {}
-        answers = data.get('answers', {}); questions_data = data.get('questions', [])
-        if not questions_data: return jsonify({'error': "Questions manquantes"}), 400
+        answers = data.get('answers', {})
+        questions_data = data.get('questions', [])
+        if not questions_data:
+            return jsonify({'error': "Questions manquantes"}), 400
 
+        # Reconstruction des questions 
         quiz_questions = []
         for q in questions_data:
             quiz_questions.append(QuizQuestion(
-                question=q['question'], options=q['choices'], correct_answer=q['answerIndex'],
-                explanation=q.get('explanation', ''), skill_area=q.get('skillArea', 'Général'),
+                question=q['question'],
+                options=q['choices'],
+                correct_answer=q['answerIndex'],
+                explanation=q.get('explanation', ''),
+                skill_area=q.get('skillArea', 'Général'),
                 difficulty=q.get('difficulty', 'moyen')
             ))
-        quiz = Quiz(title="Évaluation Candidat", description="Quiz évalué par Gemini",
-                    level="moyen", questions=quiz_questions, estimated_duration=len(quiz_questions)*2)
-        evaluator = QuizEvaluator()
-        results = evaluator.evaluate_answers(quiz, {i: answers.get(str(q.get('id', i)), -1) for i, q in enumerate(questions_data)})
 
+        # Création du quiz + évaluation 
+        quiz = Quiz(
+            title="Évaluation Candidat",
+            description="Quiz évalué par Gemini",
+            level="moyen",
+            questions=quiz_questions,
+            estimated_duration=len(quiz_questions)*2
+        )
+        evaluator = QuizEvaluator()
+        results = evaluator.evaluate_answers(
+            quiz,
+            {i: answers.get(str(q.get('id', i)), -1) for i, q in enumerate(questions_data)}
+        )
+
+        # Résultats détaillés 
         detailed_results = []
         for i, ua in enumerate(results.user_answers):
             q = quiz.questions[i]
             user_index = ua.selected_option
             user_text = q.options[user_index] if user_index >= 0 else "Aucune réponse"
-            detailed_results.append({'question_id': i, 'question': q.question,
-                                     'user_answer': user_text, 'correct_answer': q.options[q.correct_answer],
-                                     'is_correct': ua.is_correct, 'explanation': q.explanation, 'skill_area': q.skill_area})
+            detailed_results.append({
+                'question_id': i,
+                'question': q.question,
+                'user_answer': user_text,
+                'correct_answer': q.options[q.correct_answer],
+                'is_correct': ua.is_correct,
+                'explanation': q.explanation,
+                'skill_area': q.skill_area
+            })
 
         percentage = round(results.percentage, 1)
         feedback = generate_feedback(percentage, detailed_results)
-        evaluation_data = {'success': True, 'score': results.score, 'total': results.total_questions,
-                           'percentage': percentage, 'detailed_results': detailed_results, 'feedback': feedback}
+
+        evaluation_data = {
+            'success': True,
+            'score': results.score,
+            'total': results.total_questions,
+            'percentage': percentage,
+            'detailed_results': detailed_results,
+            'feedback': feedback
+        }
 
         user_id = get_jwt_identity()
-        save_result_to_db(user_id, "quiz_evaluation", evaluation_data,
-                          {"questions_count": len(questions_data), "answers_provided": len([a for a in answers.values() if a >= 0])},
-                          {"score": results.score, "percentage": results.percentage})
+        
+        meta = {
+            "questions_count": len(questions_data),
+            "answers_provided": len([a for a in answers.values() if a >= 0]),
+            "evaluation_method": "gemini_evaluator",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        refs = {
+            "score": results.score,
+            "total_questions": results.total_questions, 
+            "percentage": results.percentage,
+            "correct_answers": results.score,
+            "wrong_answers": results.total_questions - results.score
+        }
+        
+        # Sauvegarde avec la fonction améliorée
+        result_id = save_result_to_db(user_id, "quiz_evaluation", evaluation_data, meta, refs)
+        
+        if result_id:
+            print(f"Évaluation quiz sauvegardée: {percentage}% (ID: {result_id})")
+        else:
+            print(" Échec sauvegarde évaluation quiz")
+
         return jsonify(evaluation_data)
+
     except Exception as e:
+        print(f" Erreur evaluate_quiz: {e}")
         return jsonify({'error': f'Erreur évaluation: {e}'}), 500
+
+
 
 # -------------------- RESULTS API --------------------
 @app.route('/api/results', methods=['POST'])
@@ -1065,4 +1318,8 @@ def internal_error(error): return jsonify({'error': 'Erreur interne du serveur'}
 # -------------------- RUN --------------------
 if __name__ == '__main__':
     print("🚀 Server up on :3001")
+    print("📍 Endpoints formations disponibles:")
+    print("  - POST /api/formations/recommend")
+    print("  - GET /api/formations/search")
+    print("  - GET /api/formations/test")
     app.run(debug=True, host='0.0.0.0', port=3001, threaded=True)
