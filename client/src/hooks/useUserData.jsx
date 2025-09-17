@@ -49,9 +49,37 @@ export const useUserData = () => {
   const updateProfile = async (profileData) => {
     try {
       setLoading(true);
-      const updatedProfile = await userApiService.updateUserProfile(profileData);
-      setUserProfile(updatedProfile);
-      return { success: true };
+      setError(null);
+      
+      const result = await userApiService.updateUserProfile(profileData);
+      
+      if (result.success && result.updatedUser) {
+        // Met à jour le profil local ET le contexte auth
+        setUserProfile(result.updatedUser);
+        setUser(result.updatedUser); // Met à jour le contexte global
+        
+        return { success: true, user: result.updatedUser };
+      }
+      
+      return { success: false, error: 'Mise à jour échouée' };
+    } catch (error) {
+      setError(error.message);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ===== CHARGEMENT COMPLET DU PROFIL =====
+  const loadFullUserProfile = async () => {
+    if (!isAuthenticated) return;
+    
+    try {
+      setLoading(true);
+      const fullProfile = await userApiService.getUserProfile();
+      setUserProfile(fullProfile);
+      setUser(fullProfile); // Synchronise avec le contexte auth
+      return { success: true, user: fullProfile };
     } catch (error) {
       setError(error.message);
       return { success: false, error: error.message };
@@ -247,8 +275,8 @@ export const useUserData = () => {
     loading,
     error,
     
-    // Actions sur le profil
     updateProfile,
+    loadFullUserProfile,
     
     // Actions sur les CV
     uploadCV,
@@ -273,6 +301,7 @@ export const useUserData = () => {
     exportData,
     clearError,
     refreshAllData,
+     
     
     // État calculé
     isDataLoaded: !loading && userProfile !== null

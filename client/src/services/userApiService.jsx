@@ -14,6 +14,21 @@ class UserApiService {
   }
   
 
+  // Récupération du profil complet (nouvelle méthode)
+  getUserProfile = async () => {
+    try {
+      const response = await fetch(`${this.baseURL}/api/user/profile`, {
+        method: 'GET',
+        headers: this.getAuthHeaders(),
+      });
+      const result = await this.handleResponse(response);
+      return result.user || result;
+    } catch (error) {
+      throw new Error(`Erreur lors de la récupération du profil: ${error.message}`);
+    }
+  };
+
+  // Mise à jour du profil (méthode corrigée)
   updateUserProfile = async (profileData) => {
     try {
       const response = await fetch(`${this.baseURL}/api/user/profile`, {
@@ -23,16 +38,19 @@ class UserApiService {
       });
       const result = await this.handleResponse(response);
       
-      // Si l'API renvoie l'utilisateur mis à jour, on le retourne
-      if (result.success && result.user) {
-        return { ...result, updatedUser: result.user };
-      }
-      
-      return result;
+      return {
+        success: result.success,
+        message: result.message,
+        updatedUser: result.user // Le backend retourne l'utilisateur mis à jour
+      };
     } catch (error) {
       throw new Error(`Erreur lors de la mise à jour du profil: ${error.message}`);
     }
   };
+
+
+
+
   // === Auth ===
   async register(data) {
     const res = await fetch(`${this.baseURL}/api/auth/register`, {
@@ -53,10 +71,16 @@ class UserApiService {
   }
 
   async getMe() {
-    const res = await fetch(`${this.baseURL}/api/auth/me`, {
-      headers: this.getAuthHeaders(),
-    });
-    return this.handleResponse(res);
+    try {
+      // Utilise la nouvelle route profil qui est plus complète
+      return await this.getUserProfile();
+    } catch (error) {
+      // Fallback sur l'ancienne route si elle existe encore
+      const res = await fetch(`${this.baseURL}/api/auth/me`, {
+        headers: this.getAuthHeaders(),
+      });
+      return this.handleResponse(res);
+    }
   }
 
   // === CV & Jobs ===
@@ -132,33 +156,10 @@ class UserApiService {
     return this.handleResponse(res);
   }
 
-  // ===== MÉTHODES POUR useUserData HOOK =====
+ 
   
-  // Profil utilisateur
-  getUserProfile = async () => {
-    try {
-      // Pour l'instant, utilise getMe() comme profil de base
-      const userData = await this.getMe();
-      return userData.user || userData;
-    } catch (error) {
-      throw new Error(`Erreur lors de la récupération du profil: ${error.message}`);
-    }
-  };
-
-  updateUserProfile = async (profileData) => {
-    try {
-      // Cette route n'existe pas encore dans votre backend
-      // Vous devrez l'ajouter ou adapter selon vos besoins
-      const response = await fetch(`${this.baseURL}/api/user/profile`, {
-        method: 'PUT',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify(profileData)
-      });
-      return this.handleResponse(response);
-    } catch (error) {
-      throw new Error(`Erreur lors de la mise à jour du profil: ${error.message}`);
-    }
-  };
+  
+  
 
   // CV Parsing
   uploadAndParseCV = async (cvFile) => {

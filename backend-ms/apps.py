@@ -1282,7 +1282,71 @@ def evaluate_quiz():
         return jsonify({'error': f'Erreur évaluation: {e}'}), 500
 
 
+#####user profile####
 
+@app.route('/api/user/profile', methods=['GET'])
+@jwt_required()
+def get_user_profile():
+    try:
+        user_id = get_jwt_identity()
+        obj_id = ObjectId(user_id)
+        
+        user = users_collection.find_one({'_id': obj_id})
+        if not user:
+            return jsonify({'success': False, 'error': 'Utilisateur non trouvé'}), 404
+        
+        # Conversion ObjectId en string et nettoyage des données
+        user['_id'] = str(user['_id'])
+        user.pop('password', None)  # Ne jamais renvoyer le mot de passe
+        
+        return jsonify({
+            'success': True, 
+            'user': user
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/user/profile', methods=['PUT'])
+@jwt_required()
+def update_user_profile():
+    try:
+        data = request.get_json() or {}
+        user_id = get_jwt_identity()
+        obj_id = ObjectId(user_id)
+        
+        # Mise à jour des champs autorisés
+        update_fields = {}
+        allowed_fields = ['firstName', 'lastName', 'phone', 'location', 'bio', 'avatar']
+        
+        for field in allowed_fields:
+            if field in data:
+                update_fields[field] = data[field]
+        
+        # Ajout de la date de modification
+        update_fields['updatedAt'] = datetime.utcnow()
+        
+        result = users_collection.update_one(
+            {'_id': obj_id}, 
+            {'$set': update_fields}
+        )
+        
+        if result.matched_count == 0:
+            return jsonify({'success': False, 'error': 'Utilisateur non trouvé'}), 404
+        
+        # Récupération des données mises à jour
+        updated_user = users_collection.find_one({'_id': obj_id})
+        if updated_user:
+            updated_user['_id'] = str(updated_user['_id'])
+            updated_user.pop('password', None)
+        
+        return jsonify({
+            'success': True, 
+            'message': 'Profil mis à jour avec succès',
+            'user': updated_user
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 # -------------------- RESULTS API --------------------
 @app.route('/api/results', methods=['POST'])
 @jwt_required()
