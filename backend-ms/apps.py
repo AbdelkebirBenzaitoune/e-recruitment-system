@@ -56,7 +56,7 @@ jwt = JWTManager(app)
 
 # -------------------- GEMINI --------------------
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 
 # Similarity model
 try:
@@ -920,7 +920,7 @@ def chat_with_gemini():
                 history.append({"role": "model", "parts": [content]})
         
         # Génération de la réponse
-        chat_model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=system_instruction)
+        chat_model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=system_instruction)
         resp = chat_model.generate_content(history if history else [{"role": "user", "parts": ["Bonjour"]}])
         
         text = (resp.text or "").strip() or "(Réponse vide)"

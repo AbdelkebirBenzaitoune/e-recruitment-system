@@ -160,7 +160,7 @@ const DemoPage = () => {
                     onLoadedMetadata={handleLoadedMetadata}
                     poster="../images/interface.png"
                     >
-                    <source src="../videos/CV Matching + Chat IA -2025-09-10 192431.mp4" type="video/mp4" />
+                    <source src="../videos/VedioDemo.mp4" type="video/mp4" />
                     <source src="/path/to/your-demo-video.webm" type="video/webm" />
                     Votre navigateur ne supporte pas la lecture vidéo.
                     </video>
